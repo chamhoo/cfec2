@@ -4,12 +4,13 @@ auther: leechh
 import sklearn
 import numpy as np
 import pandas as pd
-from time import sleep, time
 import matplotlib.pyplot as plt
 import tensorflow.keras.backend as K
+from time import time
 from sklearn.model_selection import StratifiedKFold
 from hyperopt import hp, fmin, tpe, STATUS_OK, Trials
 from .cv import CV
+plt.style.use('ggplot')
 
 
 class Tuning(object):
@@ -17,15 +18,21 @@ class Tuning(object):
         # use %matplotlib qt5 if verbose == 3
         self.get_score = get_score_func
         self.verbose = verbose
-        self.hp = hp
+        self.hp = HP()
         self.log = TuningLog()
 
     def fmin(self, space_dict, max_evals=100):
-        return fmin(self.f, space_dict, algo=tpe.suggest, max_evals=max_evals, trials=Trials())
+        self.hp.get_space_dict(space_dict)
+        # log param
+        self.log.get_param_info(self.hp.PARAM_LIST(), self.hp.PARAM_TYPE())
+        # hyperopt fmin
+        return fmin(self.f, self.hp.HYPER_SD(), algo=tpe.suggest, max_evals=max_evals, trials=Trials())
 
     def f(self, params):
+        t0 = time()
         score = self.get_score(params)
-        update = self.log.update(score, params)
+        t1 = time() - t0
+        update = self.log.update(score, params, t1)
         if self.verbose == 3:
             if self.log.get_eval() == 1:
                 loc = self.log.cal_loc()
@@ -44,6 +51,49 @@ class Tuning(object):
             print(f'eval {self.log.get_eval()}, score {round(score, 4)}, param {param}')
 
 
+class HP(object):
+    def __init__(self):
+        self.__space_dict = dict()
+        self.hp = hp
+
+    def get_space_dict(self, space_dict):
+        """
+        :param space_dict: {'label_1': (hp.choice, (['aa', 'bb', 'cc'])),
+                            'label_2': (hp.uniform, (low, high))}
+                               +            +            +
+                               +            +            +
+                             label    distrib func  range tuple
+        """
+        self.__space_dict = space_dict
+
+    def HYPER_SD(self):
+        sd = {}
+        for label, (func, params) in self.__space_dict.items():
+            if func.__name__ == 'hp_choice':
+                sd[label] = func(label, params)
+            else:
+                sd[label] = func(label, *params)
+        return sd
+
+    def PARAM_LIST(self):
+        return list(self.__space_dict.keys())
+
+    def PARAM_TYPE(self):
+        pt = {}
+        for label, (func, params) in self.__space_dict.items():
+            if func.__name__ in ['hp_choice', 'hp_randint']:
+                pt[label] = 'discrete'
+            elif func.__name__ in ['hp_loguniform', 'hp_qloguniform', 'hp_lognormal', 'hp_qlognormal']:
+                pt[label] = 'log'
+            else:
+                pt[label] = 'numbers'
+        return pt
+
+    @staticmethod
+    def help():
+        print('- https://github.com/hyperopt/hyperopt/wiki/FMin')
+
+
 class TuningLog(object):
     def __init__(self):
         self.best_score = 2**32
@@ -52,11 +102,21 @@ class TuningLog(object):
         self.eval = 0
         self.score = []
         self.isupdate = []
+        self.usetime = []
         self.param = dict()
-        self.param_lst = []
-        self.param_type = dict()
 
-    def update(self, score, param):
+        self.param_lst = None
+        self.param_type = None
+
+    def get_param_info(self, param_lst, param_type):
+        if ((self.param_lst is not None) & (self.param_lst != self.param_lst)) or \
+                ((self.param_type is not None) & (self.param_type != self.param_type)):
+            raise ValueError(f'you need keep this two values when the older is not None.')
+        else:
+            self.param_lst = param_lst
+            self.param_type = param_type
+
+    def update(self, score, param, times):
         if score < self.best_score:
             update = True
             self.best_param = param
@@ -65,17 +125,13 @@ class TuningLog(object):
             update = False
 
         self.eval += 1
+        self.usetime.append(times)
         self.score.append(score)
         self.isupdate.append(update)
         # param
         for key, val in param.items():
             if self.eval == 1:
-                self.param_lst = list(param.keys())
                 self.param[key] = [val]
-                if isinstance(val, (int, float)):
-                    self.param_type[key] = 'numbers'
-                else:
-                    self.param_type[key] = 'str'
             else:
                 self.param[key].append(val)
         return update
@@ -84,7 +140,7 @@ class TuningLog(object):
         return self.eval
 
     def get_log(self):
-        log_df = {'score': self.score, 'update': self.isupdate}
+        log_df = {'score': self.score, 'update': self.isupdate, 'usetime': self.usetime}
         for key, val in self.param.items():
             log_df[key] = val
         return pd.DataFrame(log_df)
@@ -95,26 +151,37 @@ class TuningLog(object):
     def get_best_param(self):
         return self.best_param
 
-    def plot(self):
+    def plot(self, score_interval=None):
         loc = self.cal_loc()
         plt.figure(figsize=[loc[1] * 7, loc[0] * 7])
-        self.plotcomp()
+        self.plotcomp(False, score_interval)
 
-    def plotcomp(self, pause=False):
+    def plotcomp(self, pause=False, score_interval=None):
         loc = self.cal_loc()
-        plt.cla()
+        plt.clf()
         for idx, param in enumerate(self.param_lst):
             plt.subplot(loc[0], loc[1], idx + 1)
+            # numbers
             if self.param_type[param] == 'numbers':
                 plt.scatter(x=self.param[param], y=self.score, c='salmon', alpha=0.8)
-            elif self.param_type[param] == 'str':
+                plt.xlabel(param)
+            # log
+            elif self.param_type[param] == 'log':
+                log_x = [np.log(x) for x in self.param[param]]
+                plt.scatter(x=log_x, y=self.score, c='salmon', alpha=0.8)
+                plt.xlabel(f'np.log({param})')
+            # discrete
+            elif self.param_type[param] == 'discrete':
                 df = pd.DataFrame({'score': self.score, param: self.param[param]})
                 data = [df.score[df[param] == element].values for element in df[param].unique()]
                 plt.violinplot(data, showmeans=True, showmedians=True)
                 plt.xticks([i + 1 for i in range(len(data))], df[param].unique())
-            plt.title(param)
-            plt.xlabel(param)
+                plt.xlabel(param)
+            # title & labels
             plt.ylabel('score')
+            if score_interval is not None:
+                print(score_interval)
+                plt.ylim(*score_interval)
         if pause:
             plt.pause(0.001)
         plt.show()
