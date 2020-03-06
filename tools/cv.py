@@ -41,11 +41,14 @@ class CV(object):
         self.model = model_lst
 
     def fit(self, x, y, metrics_func, split_method=None,
-            fit_params=None, eval_param=None, use_proba=False, verbose=False, fit_use_valid=False):
+            fit_params=None, eval_param=None, use_proba=False, verbose=False, fit_use_valid=False, output_oof_pred=False):
         # x, y
         x_is_list = isinstance(x, list)
         y_is_list = isinstance(y, list)
         x_is_df = isinstance(x, pd.DataFrame)
+        
+        # oof_pred
+        oof_pred = np.zeros([len(x)]) if output_oof_pred else None
 
         # params
         if split_method is None:
@@ -94,7 +97,13 @@ class CV(object):
             score_lst.append(score)
             if verbose:
                 print(f'folds {idx} is done, score is {score}')
-        return np.mean(score_lst)
+            if output_oof_pred:
+                oof_pred[valid_idx] = y_pred
+
+        if output_oof_pred:
+            return np.mean(score_lst), oof_pred
+        else:
+            return np.mean(score_lst)
 
     def clear_model(self):
         del self.model
@@ -166,7 +175,7 @@ class Saver(object):
 
     @staticmethod
     def get_ext_lst():
-        return ['.pkl', '.cbm']
+        return ['.pkl', '.cbm', 'h5']
 
     def save(self):
         if self.suffix == '.pkl':
@@ -174,6 +183,9 @@ class Saver(object):
 
         elif self.suffix == '.cbm':
             self.model.save_model(self.path)
+
+        elif self.suffix == 'h5':
+            self.model.save(self.path)
 
         else:
             raise ValueError(f'{self.suffix} is not available')
@@ -185,6 +197,9 @@ class Saver(object):
         elif self.suffix == '.cbm':
             self.model.load_model(self.path)
             return self.model
+
+        elif self.suffix == 'h5':
+            return self.model.load(self.path)
 
         else:
             raise ValueError(f'{self.suffix} is not available')
