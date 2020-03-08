@@ -41,14 +41,15 @@ class CV(object):
         self.model = model_lst
 
     def fit(self, x, y, metrics_func, split_method=None,
-            fit_params=None, eval_param=None, use_proba=False, verbose=False, fit_use_valid=False, output_oof_pred=False):
+            fit_params=None, eval_param=None, use_proba=False, verbose=False, fit_use_valid=False,
+            output_oof_pred=False):
         # x, y
         x_is_list = isinstance(x, list)
         y_is_list = isinstance(y, list)
         x_is_df = isinstance(x, pd.DataFrame)
         
         # oof_pred
-        oof_pred = np.zeros([len(x)]) if output_oof_pred else None
+        oof_pred = np.zeros([len(y), 1]) if output_oof_pred else None
 
         # params
         if split_method is None:
