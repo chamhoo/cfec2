@@ -136,7 +136,7 @@ class MaxLrFinder(callbacks.Callback):
         result_dict = dict(zip(self.result_name_list, np.rollaxis(result_arr, 2).tolist()))
         return result_dict
 
-    def plot(self, show_exp_lr=False):
+    def plot(self, show_exp_lr=False, lim=None):
         result_dict = self.get_result()
         lr_func = lambda t: self.min_lr * self.rate ** t
         lr_list = [math.log(lr_func(t), 0.1) if show_exp_lr else lr_func(t) for t in range(self.batch_id[0])]
@@ -152,3 +152,5 @@ class MaxLrFinder(callbacks.Callback):
                 plt.plot(lr_list, sub_res)
                 plt.xlabel('lr')
                 plt.ylabel(key)
+            if lim is not None:
+                plt.ylim(*lim)

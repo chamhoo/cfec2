@@ -63,16 +63,23 @@ class EmLinear(EM):
         return K.sum(multiply([w, val]), axis=1, keepdims=False)  # (batch_size, 1)
 
 
-class EmFM(EM):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class FMLayer(Layer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def call(self, inputs, **kwargs):
-        w, val = super().call(inputs)
+        w, val = inputs
         pow_multiply = K.sum(multiply([K.pow(w, 2), K.pow(val, 2)]), 1)  # (batch_size ,k)
         multiply_pow = K.pow(K.sum(multiply([w, val]), 1), 2)  # (batch_size, k)
         pair = 0.5 * K.sum((multiply_pow - pow_multiply), axis=1, keepdims=True)  # (batch_size, 1)
         return pair
+
+    def get_config(self):
+        config = super().get_config()
+        return config
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[0], 1
 
 
 class AddBias(Layer):
@@ -141,6 +148,21 @@ class DNNLayer(Layer):
             x = self.dropout_lst[i](x)
         return x
 
+    def compute_output_shape(self, input_shape):
+        return [input_shape, self.num_neuron]
+
+    def get_config(self):
+        params = super().get_config()
+        params['num_layer'] = self.num_layer
+        params['num_neuron'] = self.num_neuron
+        params['l1'] = self.l1
+        params['l2'] = self.l2
+        params['dropout'] = self.dropout
+        params['activation'] = self.activation
+        params['bn'] = self.bn
+        params['use_bias'] = self.use_bias
+        return params
+
 
 def linear_regression(vocabulary_size, feature_number,
                       activation, loss, metrics, optimizer, l1=0., l2=0.):
@@ -151,14 +173,16 @@ def linear_regression(vocabulary_size, feature_number,
     return outputs([idx, val], x, activation, loss, metrics, optimizer)
 
 
-def fm(vocabulary_size, feature_number,
-       activation, loss, metrics, optimizer, l1_linear=0., l2_linear=0., l1_pair=0., l2_pair=0., k=10):
+def fm(vocabulary_size, feature_number, activation, loss, metrics, optimizer,
+       l1_linear=0., l2_linear=0., l1_pair=0., l2_pair=0., k=10, use_linear=True):
     # input
     idx, val = Input(shape=[feature_number], dtype='float32'), Input(shape=[feature_number], dtype='float32')
     # em
-    linear = EmLinear(vocabulary_size, feature_number, name='em_l', l1=l1_linear, l2=l2_linear)([idx, val])
-    pair = EmFM(vocabulary_size, feature_number, name='em_l', k=k, l1=l1_pair, l2=l2_pair)([idx, val])
-    x = add([linear, pair])
+    em = EM(vocabulary_size, feature_number, name='em_l', k=k, l1=l1_pair, l2=l2_pair)([idx, val])
+    x = FMLayer()(em)
+    if use_linear:
+        linear = EmLinear(vocabulary_size, feature_number, name='em_l', l1=l1_linear, l2=l2_linear)([idx, val])
+        x = add([linear, x])
     x = AddBias(name='bias')(x)
     return outputs([idx, val], x, activation, loss, metrics, optimizer)
 
@@ -168,52 +192,29 @@ def deepfm(vocabulary_size, feature_number,
            l1_linear=0., l2_linear=0.,
            l1_pair=0., l2_pair=0., use_fm=True,
            l1_deep=0., l2_deep=0., use_deep=True,
-           deep_dropout=0., deep_use_bn=False,
+           deep_dropout=0., deep_use_bn=False, deep_use_bias=False,
            num_deep_layer=2, num_neuron=128, deep_activation='relu', k=5):
     # input
     idx, val = Input(shape=[feature_number], dtype='float32'), Input(shape=[feature_number], dtype='float32')
+    x = list()
     # linear
-    em_l = Embedding(vocabulary_size, 1,
-                     input_length=feature_number,
-                     name='em_l',
-                     embeddings_regularizer=regularizers.L1L2(l1_linear, l2_linear))(idx)
-    val_ed = K.expand_dims(val, axis=-1)  # (batch_size, feature_numbers, 1)
-    linear = K.sum(multiply([em_l, val_ed]), axis=1, keepdims=False)  # (batch_size, 1)
-
-    # pair
-    em_p = Embedding(vocabulary_size, k,
-                     input_length=feature_number,
-                     name='em_p',
-                     embeddings_regularizer=regularizers.L1L2(l1_pair, l2_pair))(idx)  # (batch, feature_number, k)
-    em = multiply([em_p, val_ed])    # (batch, feature_number, k)
-    pow_multiply = K.sum((K.pow(em, 2)), 1)  # (batch_size ,k)
-    multiply_pow = K.pow(K.sum(em, 1), 2)  # (batch_size, k)
-    pair = 0.5 * (multiply_pow - pow_multiply)  # (batch_size, k)
-
-    # deep
-    deep = K.reshape(em, shape=(-1, int(feature_number * k)))
-    for i in range(num_deep_layer):
-        # deep  (batch_size, feature_number * k)
-        deep = Dense(num_neuron,
-                     use_bias=False,
-                     kernel_regularizer=regularizers.L1L2(l1_deep, l2_deep),
-                     name=f'deep_layer_{i}')(deep)
-        deep = BatchNormalization()(deep) if deep_use_bn else deep
-        deep_act = Activation(deep_activation) if isinstance(deep_activation, str) else deep_activation
-        deep = deep_act(deep)
-        deep = Dropout(rate=deep_dropout)(deep)  # (batch_size, layer)
+    x.append(EmLinear(vocabulary_size, feature_number, name='em', l1=l1_linear, l2=l2_linear)([idx, val]))
+    # em
+    em_w, em_val = EM(vocabulary_size, feature_number, name='em', k=k, l1=l1_pair, l2=l2_pair)([idx, val])
+    em = multiply([em_w, em_val])   # (batch, fn, k)
+    em = K.reshape(em, shape=(-1, int(feature_number * k)))   # (batch, fn * k)
+    if use_deep:
+        x.append(DNNLayer(num_neuron=num_neuron, num_layer=num_deep_layer,
+                          l1=l1_deep, l2=l2_deep,
+                          dropout=deep_dropout, activation=deep_activation,
+                          bn=deep_use_bn, use_bias=deep_use_bias)(em))
+    if use_fm:
+        x.append(FMLayer(name='FM')([em_w, em_val]))
 
     # concat & out
-    out = linear   # (batch_size, 1)
-    if use_fm:
-        out = K.concatenate([out, pair], axis=-1)  # (batch_size, +=k)
-    if use_deep:
-        out = K.concatenate([out, deep], axis=-1)  # (batch_size, +=layer[-1])
-    out = Dense(1, use_bias=True, activation=activation, name='out')(out)
-    # model
-    model = Model(inputs=[idx, val], outputs=out)
-    model.compile(loss=loss, metrics=metrics, optimizer=optimizer)
-    return model
+    x = K.concatenate(x, axis=-1)
+    x = Dense(1, use_bias=True, name='out')(x)
+    return outputs([idx, val], x, activation, loss, metrics, optimizer)
 
 
 def xdeepfm(vocabulary_size, feature_number,
@@ -320,3 +321,191 @@ def xdeepfm(vocabulary_size, feature_number,
     model = Model(inputs=[idx, val], outputs=out)
     model.compile(loss=loss, metrics=metrics, optimizer=optimizer)
     return model
+
+
+class CrossLayer(Layer):
+
+    def __init__(self, layer_num=2, l1=0., l2=0., **kwargs):
+        self.layer_num = layer_num
+        self.l1 = l1
+        self.l2 = l2
+        super().__init__(**kwargs)
+
+    def build(self, input_shape):
+
+        if len(input_shape) != 2:
+            raise ValueError(
+                "Unexpected inputs dimensions %d, expect to be 2 dimensions" % (len(input_shape),))
+
+        dim = int(input_shape[-1])
+
+        self.kernels = [self.add_weight(name=f'cross_kernel_{i}',
+                                        shape=(dim, 1),
+                                        regularizer=regularizers.L1L2(self.l1, self.l2),
+                                        trainable=True) for i in range(self.layer_num)]
+
+        self.bias = [self.add_weight(name=f'cross_bias_{i}',
+                                     shape=(dim, 1),
+                                     initializer=tf.keras.initializers.zeros(),
+                                     trainable=True) for i in range(self.layer_num)]
+        # Be sure to call this somewhere!
+        super().build(input_shape)
+
+    def call(self, inputs, **kwargs):
+        if K.ndim(inputs) != 2:
+            raise ValueError(
+                "Unexpected inputs dimensions %d, expect to be 2 dimensions" % (K.ndim(inputs)))
+
+        x_0 = tf.expand_dims(inputs, axis=2)
+        x_l = x_0
+        for i in range(self.layer_num):
+            xl_w = tf.tensordot(x_l, self.kernels[i], axes=(1, 0))
+            dot_ = tf.matmul(x_0, xl_w)
+            x_l = dot_ + self.bias[i] + x_l
+        x_l = tf.squeeze(x_l, axis=2)
+        return x_l
+
+    def get_config(self):
+        config = super().get_config()
+
+        config['layer_num'] = self.layer_num
+        config['l2'] = self.l2
+        config['l1'] = self.l1
+        return config
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+
+def dcn(vocabulary_size, feature_number,
+        activation, loss, metrics, optimizer,
+        l1_linear=0., l2_linear=0.,
+        l1_em=0., l2_em=0.,
+        l1_cross=0., l2_cross=0.,
+        num_cross=2,
+        l1_deep=0., l2_deep=0.,
+        deep_dropout=0., deep_use_bn=False,
+        deep_use_bias=False,
+        num_deep_layer=2, num_neuron=128,
+        deep_activation='relu', k=5,
+        use_linear=True, use_cross=True, use_deep=True):
+    # input
+    idx, val = Input(shape=[feature_number], dtype='float32'), Input(shape=[feature_number], dtype='float32')
+    # em
+    em_w, em_val = EM(vocabulary_size, feature_number, name='em', k=k, l1=l1_em, l2=l2_em)([idx, val])
+    em = multiply([em_w, em_val])   # (batch, fn, k)
+    em = K.reshape(em, shape=(-1, int(feature_number * k)))   # (batch, fn * k)
+
+    out = list()
+    if use_linear:
+        out.append(EmLinear(vocabulary_size, feature_number,
+                            name='em_l',
+                            l1=l1_linear, l2=l2_linear)([idx, val]))
+    if use_deep:
+        out.append(DNNLayer(num_neuron=num_neuron, num_layer=num_deep_layer,
+                            l1=l1_deep, l2=l2_deep,
+                            dropout=deep_dropout, activation=deep_activation,
+                            bn=deep_use_bn, use_bias=deep_use_bias)(em))
+    if use_cross:
+        out.append(CrossLayer(layer_num=num_cross, l1=l1_cross, l2=l2_cross)(em))
+
+    out = K.concatenate(out, axis=-1)
+    out = Dense(1, use_bias=True, name='out')(out)
+    return outputs([idx, val], out, activation, loss, metrics, optimizer)
+
+
+class AFM(Layer):
+    def __init__(self, feature_number, attention_size=8, afm_l1=0., afm_l2=0., k=5, **kwargs):
+        super().__init__(**kwargs)
+        self.attention_size = attention_size
+        self.afm_l1 = afm_l1
+        self.afm_l2 = afm_l2
+        self.k = k
+        self.feature_number = feature_number
+
+    def build(self, input_shape):
+        self.attention_w = self.add_weight(name='attention_w',
+                                           shape=[self.k, self.attention_size],
+                                           dtype='float32',
+                                           initializer=tf.keras.initializers.GlorotNormal(),
+                                           regularizer=regularizers.L1L2(self.afm_l1, self.afm_l2),
+                                           trainable=True)
+
+        self.attention_b = self.add_weight(name='attention_b',
+                                           shape=[self.attention_size],
+                                           dtype='float32',
+                                           initializer=tf.keras.initializers.GlorotNormal(),
+                                           trainable=True)
+
+        self.attention_h = self.add_weight(name='attention_h',
+                                           shape=[self.attention_size],
+                                           dtype='float32',
+                                           initializer=tf.keras.initializers.GlorotNormal(),
+                                           trainable=True)
+
+        self.attention_p = self.add_weight(name='attention_p',
+                                           shape=[self.k, 1],
+                                           dtype='float32',
+                                           initializer=tf.keras.initializers.GlorotNormal(),
+                                           trainable=True)
+
+        super().build(input_shape)
+
+    def call(self, inputs, **kwargs):
+        em_w, em_val = inputs
+        em = multiply([em_w, em_val])   # (batch, fn, k)
+
+        ew_product_list = []
+        for i in range(self.feature_number):
+            for j in range(i + 1, self.feature_number):
+                ew_product_list.append(tf.multiply(em[:, i, :], em[:, j, :]))  # (batch, k)
+
+        product = tf.stack(ew_product_list)  # (fn*(fn-1)/2), batch, k)
+        product = tf.transpose(product, perm=[1, 0, 2], name='product')  # (batch, fn*(fn-1)/2), k)
+
+        x = tf.reshape(product, shape=(-1, self.k))
+        x = tf.matmul(x, self.attention_w)
+        x = tf.add(x, self.attention_b)
+        num_interactions = int(self.feature_number * (self.feature_number-1) / 2)
+        x = tf.reshape(x, shape=[-1, num_interactions, self.attention_size])   # (batch, fn*(fn-1)/2), k)
+
+        x = tf.multiply(tf.nn.relu(x), self.attention_h)
+        x = tf.exp(tf.reduce_sum(x, axis=2, keepdims=True))  # (batch, fn*(fn-1)/2), 1)
+        x_sum = tf.reduce_sum(x, axis=1, keepdims=True)   # (batch, 1, 1)
+        out = tf.divide(x, x_sum, name='attention_out')     # (batch, fn*(fn-1)/2), 1)
+
+        atx_product = tf.reduce_sum(tf.multiply(out, product), axis=1, name='afm')  # N * K
+        return tf.matmul(atx_product, self.attention_p)   # (batch, 1)
+
+    def get_config(self):
+        config = super().get_config()
+
+        config['attention_size'] = self.attention_size
+        config['afm_l1'] = self.afm_l1
+        config['afm_l2'] = self.afm_l2
+        config['k'] = self.k
+        config['feature_number'] = self.feature_number
+        return config
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[0], 1
+
+
+def afm(vocabulary_size, feature_number,
+        activation, loss, metrics, optimizer,
+        l1_linear=0., l2_linear=0.,
+        l1_em=0., l2_em=0.,
+        afm_l1=0., afm_l2=0.,
+        num_att=8, k=5,
+        use_linear=True):
+
+    # input
+    idx, val = Input(shape=[feature_number], dtype='float32'), Input(shape=[feature_number], dtype='float32')
+    # afm
+    em = EM(vocabulary_size, feature_number, name='EM', k=k, l1=l1_em, l2=l2_em)([idx, val])
+    x = AFM(feature_number=feature_number, attention_size=num_att, afm_l1=afm_l1, afm_l2=afm_l2, k=k)(em)
+    if use_linear:
+        linear = EmLinear(vocabulary_size, feature_number, name='em_l', l1=l1_linear, l2=l2_linear)([idx, val])
+        x = add([linear, x])
+    x = AddBias(name='bias')(x)
+    return outputs([idx, val], x, activation, loss, metrics, optimizer)

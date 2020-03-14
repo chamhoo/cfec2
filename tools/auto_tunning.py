@@ -180,7 +180,6 @@ class TuningLog(object):
             # title & labels
             plt.ylabel('score')
             if score_interval is not None:
-                print(score_interval)
                 plt.ylim(*score_interval)
         if pause:
             plt.pause(0.001)
