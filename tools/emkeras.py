@@ -415,13 +415,14 @@ def dcn(vocabulary_size, feature_number,
 
 
 class AFM(Layer):
-    def __init__(self, feature_number, attention_size=8, afm_l1=0., afm_l2=0., k=5, **kwargs):
+    def __init__(self, feature_number, attention_size=8, afm_l1=0., afm_l2=0., k=5, dropout=0., **kwargs):
         super().__init__(**kwargs)
         self.attention_size = attention_size
         self.afm_l1 = afm_l1
         self.afm_l2 = afm_l2
         self.k = k
         self.feature_number = feature_number
+        self.dropout = dropout
 
     def build(self, input_shape):
         self.attention_w = self.add_weight(name='attention_w',
@@ -449,6 +450,8 @@ class AFM(Layer):
                                            initializer=tf.keras.initializers.GlorotNormal(),
                                            trainable=True)
 
+        self.dropout_layer = Dropout(self.dropout)
+
         super().build(input_shape)
 
     def call(self, inputs, **kwargs):
@@ -474,7 +477,8 @@ class AFM(Layer):
         x_sum = tf.reduce_sum(x, axis=1, keepdims=True)   # (batch, 1, 1)
         out = tf.divide(x, x_sum, name='attention_out')     # (batch, fn*(fn-1)/2), 1)
 
-        atx_product = tf.reduce_sum(tf.multiply(out, product), axis=1, name='afm')  # N * K
+        atx_product = tf.reduce_sum(tf.multiply(out, product), axis=1, name='afm')  # (batch, k)
+        atx_product = self.dropout_layer(atx_product)
         return tf.matmul(atx_product, self.attention_p)   # (batch, 1)
 
     def get_config(self):
@@ -488,7 +492,7 @@ class AFM(Layer):
         return config
 
     def compute_output_shape(self, input_shape):
-        return input_shape[0], 1
+        return input_shape[0][0], 1
 
 
 def afm(vocabulary_size, feature_number,
