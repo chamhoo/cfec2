@@ -70,6 +70,11 @@ class CyclicLR(callbacks.Callback):
         else:
             K.set_value(self.model.optimizer.lr, self.clr())
 
+    def on_train_end(self, logs=None):
+        self.clr_iterations = 0.
+        self.trn_iterations = 0.
+        self.history = {}
+        
     def on_batch_end(self, epoch, logs=None):
         logs = logs or {}
         self.trn_iterations += 1
