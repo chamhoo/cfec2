@@ -217,108 +217,117 @@ def deepfm(vocabulary_size, feature_number,
     return outputs([idx, val], x, activation, loss, metrics, optimizer)
 
 
+class CIN(Layer):
+    def __init__(self, num_cin_layer=2, num_cin_size=128,
+                 cin_activation='relu', split_half=True,
+                 l1_cin=0., l2_cin=0., cin_dropout=0.,
+                 **kwargs):
+
+        super().__init__(**kwargs)
+        self.num_cin_layer = num_cin_layer
+        self.num_cin_size = num_cin_size
+        self.cin_activation = cin_activation
+        self.split_half = split_half
+        self.l1_cin = l1_cin
+        self.l2_cin = l2_cin
+        self.cin_dropout = cin_dropout
+
+    def build(self, input_shape):
+        self.conv_lst = list()
+        for i in range(self.num_cin_layer):
+            self.conv_lst.append(Conv1D(filters=self.num_cin_size,
+                                        kernel_size=1,
+                                        padding='valid',
+                                        activation=self.cin_activation,
+                                        use_bias=True,
+                                        kernel_regularizer=regularizers.L1L2(self.l1_cin, self.l2_cin)))
+        self.dropout = Dropout(rate=self.cin_dropout)
+        
+    def call(self, inputs, **kwargs):
+        # inputs shape is (batch, feature_number, k)
+        k = inputs.shape[-1]
+        cin_list = [tf.transpose(inputs, perm=[0, 2, 1])]
+        cin_reslut = []
+        x0 = K.expand_dims(cin_list[0])   # (batch, k, f0, 1)
+        for i in range(self.num_cin_layer):
+
+            fv = cin_list[-1].shape[2]  # feature vector
+            fn = cin_list[0].shape[2]  # number of features
+
+            xk = K.expand_dims(cin_list[-1])   # (batch, k, fk-1, 1)
+            cin = tf.matmul(x0, xk, transpose_b=True, name=f'cin_mat_{i}')  # (batch, k, f0, fk-1)
+            cin = tf.reshape(cin, shape=[-1, k, fn * fv])  # (batch, k, f0 * fk-1)
+            cin = self.conv_lst[i](cin)  # (batch, k, fv)
+
+            if self.split_half:
+                if i != self.num_cin_layer - 1:
+                    next_hidden, direct_connect = tf.split(cin, 2 * [self.num_cin_size // 2], 2)
+                else:
+                    direct_connect = cin
+                    next_hidden = 0
+            else:
+                direct_connect = cin
+                next_hidden = cin
+
+            cin_reslut.append(direct_connect)
+            cin_list.append(next_hidden)
+
+        cin_reslut = tf.concat(cin_reslut, axis=2)   # (batch_size, k, feature map num)
+        cin_reslut = tf.reduce_sum(cin_reslut, 1, keepdims=False)  # (batch_size, cin feature map num)
+        cin_reslut = self.dropout(cin_reslut)  # (batch_size, layer)
+        return cin_reslut
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[0], self.num_cin_size
+
+    def get_config(self):
+        params = super().get_config()
+        params['num_cin_size'] = self.num_cin_size
+        params['num_cin_layer'] = self.num_cin_layer
+        params['cin_activation'] = self.cin_activation
+        params['split_half'] = self.split_half
+        params['l1_cin'] = self.l1_cin
+        params['l2_cin'] = self.l2_cin
+        params['cin_dropout'] = self.cin_dropout
+        return params
+
+
 def xdeepfm(vocabulary_size, feature_number,
             activation, loss, metrics, optimizer,
             l1_linear=0., l2_linear=0.,
             l1_pair=0., l2_pair=0.,
-            use_cin=True, num_cin_layer=2, num_cin_size=128,
-            cin_activation='relu', split_half=True,
+            use_linear=True, use_cin=True,
+            num_cin_layer=2, num_cin_size=128,
+            cin_activation='linear', split_half=True,
             l1_cin=0., l2_cin=0., cin_dropout=0.,
             l1_deep=0., l2_deep=0., use_deep=True,
             deep_dropout=0., deep_use_bn=False,
             num_deep_layer=2, num_neuron=128, deep_activation='relu', k=5):
     # input
     idx, val = Input(shape=[feature_number], dtype='float32'), Input(shape=[feature_number], dtype='float32')
-    # linear
-    linear = EmLinear(vocabulary_size, feature_number, name='em_l', l1=l1_linear, l2=l2_linear)([idx, val])
-
-    # deep
+    # x
+    x = list()
     em = EM(vocabulary_size, feature_number, k=5, name='em', l1=l1_pair, l2=l2_pair)([idx, val])
-    em = multiply(em)
-    deep = K.reshape(em, shape=(-1, int(feature_number * k)))
-    deep = DNNLayer(num_neuron=num_neuron, num_layer=num_deep_layer,
-                    l1=l1_deep, l2=l2_deep, dropout=deep_dropout,
-                    activation=deep_activation, bn=deep_use_bn, use_bias=False)(deep)
-    """
-    # cin
-    cin_list = [em]
-    cin_reslut = []
-    x0 = tf.split(cin_list[0], k * [1], 2)
-    for i in range(num_cin_layer):
-
-        fv = cin_list[-1].shape[1]  # feature vector
-        fn = cin_list[0].shape[1]   # number of features
-        xk = tf.split(cin_list[-1], k * [1], 2)
-        cin = tf.matmul(x0, xk, transpose_b=True, name=f'cin_mat_{i}')  # (k, batch, num_feature, last feature vector)
-        cin = tf.reshape(cin, shape=[k, -1, fn * fv])  # (k, batch, num_feature * last feature vector)
-        cin = tf.transpose(cin, perm=[1, 0, 2])  # (batch, k, num_feature * last tensor feature vector)
-
-        cin = Conv1D(filters=num_cin_size,
-                     kernel_size=1,
-                     padding='valid',
-                     activation=cin_activation,
-                     use_bias=True,
-                     kernel_regularizer=regularizers.L1L2(l1_cin, l2_cin))(cin)   # (batch, k, feature_vector)
-        cin = tf.transpose(cin, perm=[0, 2, 1])   # (batch, feature_vector, k)
-
-        if split_half:
-            if i != num_cin_layer - 1:
-                next_hidden, direct_connect = tf.split(cin, 2 * [num_cin_size // 2], 1)
-            else:
-                direct_connect = cin
-                next_hidden = 0
-        else:
-            direct_connect = cin
-            next_hidden = cin
-
-        cin_reslut.append(direct_connect)
-        cin_list.append(next_hidden)
-    """
-    # cin
-    cin_list = [tf.transpose(em, perm=[0, 2, 1])]
-    cin_reslut = []
-    x0 = K.expand_dims(cin_list[0])   # (batch, k, f0, 1)
-    for i in range(num_cin_layer):
-
-        fv = cin_list[-1].shape[2]  # feature vector
-        fn = cin_list[0].shape[2]  # number of features
-
-        xk = K.expand_dims(cin_list[-1])   # (batch, k, fk-1, 1)
-        cin = tf.matmul(x0, xk, transpose_b=True, name=f'cin_mat_{i}')  # (batch, k, f0, fk-1)
-        cin = tf.reshape(cin, shape=[-1, k, fn * fv])  # (batch, k, f0 * fk-1)
-
-        cin = Conv1D(filters=num_cin_size,
-                     kernel_size=1,
-                     padding='valid',
-                     activation=cin_activation,
-                     use_bias=True,
-                     kernel_regularizer=regularizers.L1L2(l1_cin, l2_cin))(cin)  # (batch, k, fv)
-
-        if split_half:
-            if i != num_cin_layer - 1:
-                next_hidden, direct_connect = tf.split(cin, 2 * [num_cin_size // 2], 2)
-            else:
-                direct_connect = cin
-                next_hidden = 0
-        else:
-            direct_connect = cin
-            next_hidden = cin
-
-        cin_reslut.append(direct_connect)
-        cin_list.append(next_hidden)
-
-    cin_reslut = tf.concat(cin_reslut, axis=2)   # (batch_size, k, feature map num)
-    cin_reslut = tf.reduce_sum(cin_reslut, 1, keepdims=False)  # (batch_size, cin feature map num)
-    cin_reslut = Dropout(rate=cin_dropout)(cin_reslut)  # (batch_size, layer)
-    # concat & out
-    out = linear   # (batch_size, 1)
-    if use_cin:
-        out = K.concatenate([out, cin_reslut], axis=-1)  # (batch_size, +=k)
+    em = multiply(list(em))
     if use_deep:
-        out = K.concatenate([out, deep], axis=-1)  # (batch_size, +=layer[-1])
-    out = Dense(1, use_bias=True, activation=activation, name='out')(out)
+        deep = K.reshape(em, shape=(-1, int(feature_number * k)))
+        x.append(DNNLayer(num_neuron=num_neuron, num_layer=num_deep_layer,
+                          l1=l1_deep, l2=l2_deep, dropout=deep_dropout,
+                          activation=deep_activation, bn=deep_use_bn, use_bias=False)(deep))
+    if use_cin:
+        x.append(CIN(num_cin_layer=num_cin_layer,
+                     num_cin_size=num_cin_size,
+                     cin_activation=cin_activation,
+                     split_half=split_half,
+                     l1_cin=l1_cin, l2_cin=l2_cin, 
+                     cin_dropout=cin_dropout)(em))
+    if use_linear:
+        x.append(EmLinear(vocabulary_size, feature_number, name='em_linear', l1=l1_linear, l2=l2_linear)([idx, val]))
+
+    x = K.concatenate(x, axis=-1)  # (batch_size, +=layer[-1])
+    x = Dense(1, use_bias=True, activation=activation, name='out')(x)
     # model
-    model = Model(inputs=[idx, val], outputs=out)
+    model = Model(inputs=[idx, val], outputs=x)
     model.compile(loss=loss, metrics=metrics, optimizer=optimizer)
     return model
 
