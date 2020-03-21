@@ -18,19 +18,30 @@ class CV(object):
         self.score = None
         self.feature_importance = {}
         self.random_state = random_state
+        self.model = self.__model_compliance(model, nfolds)
 
-        self.model = []
+    @staticmethod
+    def __model_compliance(model, nfolds=5):
+        model_lst = list()
         if isinstance(model, tf.keras.Model):
             for _ in range(nfolds):
                 new_model = tf.keras.models.clone_model(model)
                 new_model.compile(loss=model.loss, optimizer=model.optimizer, metrics=model.metrics)
                 new_model.set_weights(model.get_weights())
-                self.model.append(new_model)
-        elif (isinstance(model, list)) and (len(model) == nfolds):
-            self.model = model
+                model_lst.append(new_model)
+
+        elif isinstance(model, list):
+            if len(model) == nfolds:
+                model_lst = model
+            else:
+                raise IndexError(f'len(model) should be same as nfolds and should be {nfolds}, not {len(model)}')
+
         else:
-            raise TypeError(f'ddddd')
-            # self.model = [model for _ in range(nfolds)]
+            if callable(getattr(model, 'fit')) and callable(getattr(model, 'predict')):
+                model_lst = [deepcopy(model) for _ in range(nfolds)]
+            else:
+                AttributeError('model class should have 2 basic Attribute: -fit, -predict')
+        return model_lst
 
     def __len__(self):
         return len(self.model)

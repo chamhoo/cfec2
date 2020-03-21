@@ -164,6 +164,18 @@ class DNNLayer(Layer):
         return params
 
 
+def LR(input_shape, loss, metrics, activation='sigmoid', optimizer='Adam', l1=0., l2=0.):
+    x = Input(shape=[input_shape], dtype='float32')
+    y = Dense(units=1,
+              activation=activation,
+              use_bias=True,
+              kernel_regularizer=regularizers.L1L2(l1, l2), name=f'dense')(x)
+    # model
+    model = Model(inputs=x, outputs=y)
+    model.compile(loss=loss, metrics=metrics, optimizer=optimizer)
+    return model
+
+
 def linear_regression(vocabulary_size, feature_number,
                       activation, loss, metrics, optimizer, l1=0., l2=0.):
     idx, val = Input(shape=[feature_number], dtype='float32'), Input(shape=[feature_number], dtype='float32')
@@ -522,3 +534,127 @@ def afm(vocabulary_size, feature_number,
         x = add([linear, x])
     x = AddBias(name='bias')(x)
     return outputs([idx, val], x, activation, loss, metrics, optimizer)
+
+
+class InteractingLayer(Layer):
+    def __init__(self, attem_size=8, head_num=2, use_res=True, seed=1024, **kwargs):
+        if head_num <= 0:
+            raise ValueError('head_num must be a int > 0')
+        self.attem_size = attem_size
+        self.head_num = head_num
+        self.use_res = use_res
+        self.seed = seed
+        super().__init__(**kwargs)
+
+    def build(self, input_shape):
+        if len(input_shape) != 3:
+            raise ValueError(
+                "Unexpected inputs dimensions %d, expect to be 3 dimensions" % (len(input_shape)))
+        embedding_size = int(input_shape[-1])
+
+        self.W_Query = self.add_weight(
+            name='query',
+            shape=[embedding_size, self.attem_size * self.head_num],
+            dtype=tf.float32,
+            initializer=tf.keras.initializers.TruncatedNormal(seed=self.seed)
+        )
+        self.W_key = self.add_weight(
+            name='key',
+            shape=[embedding_size, self.attem_size * self.head_num],
+            dtype=tf.float32,
+            initializer=tf.keras.initializers.TruncatedNormal(seed=self.seed + 1)
+        )
+        self.W_Value = self.add_weight(
+            name='value',
+            shape=[embedding_size, self.attem_size * self.head_num],
+            dtype=tf.float32,
+            initializer=tf.keras.initializers.TruncatedNormal(seed=self.seed + 2)
+        )
+        if self.use_res:
+            self.W_Res = self.add_weight(
+                name='res',
+                shape=[embedding_size, self.attem_size * self.head_num],
+                dtype=tf.float32,
+                initializer=tf.keras.initializers.TruncatedNormal(seed=self.seed + 3)
+            )
+
+        # Be sure to call this somewhere!
+        super().build(input_shape)
+
+    def call(self, inputs, **kwargs):
+        if K.ndim(inputs) != 3:
+            raise ValueError(
+                "Unexpected inputs dimensions %d, expect to be 3 dimensions" % (K.ndim(inputs)))
+
+        querys = K.dot(inputs, self.W_Query)   # (batch, fn, attem_size * nhead)
+        keys = K.dot(inputs, self.W_key)     # ~
+        values = K.dot(inputs, self.W_Value)   # ~
+
+        # head_num None F D
+        querys = tf.stack(tf.split(querys, self.head_num, axis=2))   # (nhead, batch, fn, attem_size)
+        keys = tf.stack(tf.split(keys, self.head_num, axis=2))       # ~
+        values = tf.stack(tf.split(values, self.head_num, axis=2))   # ~
+
+        inner_product = tf.matmul(querys, keys, transpose_b=True)  # (nhead, batch, fn, fn)
+        normalized_att_scores = tf.nn.softmax(inner_product)
+
+        result = tf.matmul(normalized_att_scores, values)  # head_num None F D
+        result = tf.concat(tf.split(result, self.head_num), axis=-1)
+        result = tf.squeeze(result, axis=0)  # None F D*head_num
+
+        if self.use_res:
+            result += K.dot(inputs, self.W_Res)
+        result = tf.nn.relu(result)
+
+        return result
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[0], input_shape[1], self.attem_size * self.head_num
+
+    def get_config(self):
+        config = super().get_config()
+        config['attem_size'] = self.attem_size
+        config['head_num'] = self.head_num
+        config['use_res'] = self.use_res
+        config['seed'] = self.seed
+        return config
+
+
+def auto_int(vocabulary_size, feature_number,
+             activation, loss, metrics, optimizer,
+             l1_linear=0., l2_linear=0.,
+             l1_em=0., l2_em=0.,
+             attem_size=8, head_num=2,
+             use_res=True, num_att_layer=3,
+             l1_deep=0., l2_deep=0.,
+             deep_dropout=0., deep_use_bn=False,
+             deep_use_bias=False,
+             num_deep_layer=2, num_neuron=128,
+             deep_activation='relu', k=5,
+             use_linear=True, use_att=True, use_deep=True):
+    # input
+    idx, val = Input(shape=[feature_number], dtype='float32'), Input(shape=[feature_number], dtype='float32')
+    # em
+    em_w, em_val = EM(vocabulary_size, feature_number, name='em', k=k, l1=l1_em, l2=l2_em)([idx, val])
+    em = multiply([em_w, em_val])   # (batch, fn, k)
+
+    out = list()
+    if use_linear:
+        out.append(EmLinear(vocabulary_size, feature_number,
+                            name='em_l',
+                            l1=l1_linear, l2=l2_linear)([idx, val]))
+    if use_deep:
+        deep = K.reshape(em, shape=(-1, int(feature_number * k)))  # (batch, fn * k)
+        out.append(DNNLayer(num_neuron=num_neuron, num_layer=num_deep_layer,
+                            l1=l1_deep, l2=l2_deep,
+                            dropout=deep_dropout, activation=deep_activation,
+                            bn=deep_use_bn, use_bias=deep_use_bias)(deep))
+    if use_att:
+        att = em
+        for i in range(num_att_layer):
+            att = InteractingLayer(attem_size=attem_size, head_num=head_num, use_res=use_res, name=f'att_{i}')(att)
+        out.append(tf.keras.layers.Flatten()(att))
+
+    out = K.concatenate(out, axis=-1)
+    out = Dense(1, use_bias=True, name='out')(out)
+    return outputs([idx, val], out, activation, loss, metrics, optimizer)
