@@ -537,13 +537,15 @@ def afm(vocabulary_size, feature_number,
 
 
 class InteractingLayer(Layer):
-    def __init__(self, attem_size=8, head_num=2, use_res=True, seed=1024, **kwargs):
+    def __init__(self, attem_size=8, head_num=2, use_res=True, dropout=0., activation='relu', seed=1024, **kwargs):
         if head_num <= 0:
             raise ValueError('head_num must be a int > 0')
         self.attem_size = attem_size
         self.head_num = head_num
         self.use_res = use_res
         self.seed = seed
+        self.dropout_value = dropout
+        self.activation_value = activation
         super().__init__(**kwargs)
 
     def build(self, input_shape):
@@ -579,6 +581,8 @@ class InteractingLayer(Layer):
             )
 
         # Be sure to call this somewhere!
+        self.act = Activation(self.activation_value) if isinstance(self.activation_value, str) else self.activation_value
+        self.dropout = Dropout(self.dropout_value)
         super().build(input_shape)
 
     def call(self, inputs, **kwargs):
@@ -604,8 +608,8 @@ class InteractingLayer(Layer):
 
         if self.use_res:
             result += K.dot(inputs, self.W_Res)
-        result = tf.nn.relu(result)
-
+        result = self.act(result)
+        result = self.dropout(result)
         return result
 
     def compute_output_shape(self, input_shape):
@@ -626,6 +630,7 @@ def auto_int(vocabulary_size, feature_number,
              l1_em=0., l2_em=0.,
              attem_size=8, head_num=2,
              use_res=True, num_att_layer=3,
+             att_dropout=0., att_act='relu',
              l1_deep=0., l2_deep=0.,
              deep_dropout=0., deep_use_bn=False,
              deep_use_bias=False,
@@ -652,7 +657,12 @@ def auto_int(vocabulary_size, feature_number,
     if use_att:
         att = em
         for i in range(num_att_layer):
-            att = InteractingLayer(attem_size=attem_size, head_num=head_num, use_res=use_res, name=f'att_{i}')(att)
+            att = InteractingLayer(attem_size=attem_size,
+                                   head_num=head_num,
+                                   use_res=use_res,
+                                   dropout=att_dropout,
+                                   activation=att_act,
+                                   name=f'att_{i}')(att)
         out.append(tf.keras.layers.Flatten()(att))
 
     out = K.concatenate(out, axis=-1)
