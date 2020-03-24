@@ -151,19 +151,21 @@ class DNNLayer(Layer):
             self.dense_lst.append(
                 Dense(units=self.num_neuron,
                       use_bias=self.use_bias,
+                      kernel_initializer=tf.keras.initializers.GlorotNormal(),
                       kernel_regularizer=regularizers.L1L2(self.l1, self.l2), name=f'dense_{i}')
             )
 
-            self.bn_lst.append(BatchNormalization())
             act = Activation(self.activation) if isinstance(self.activation, str) else self.activation
             self.act_lst.append(act)
             self.dropout_lst.append(Dropout(rate=self.dropout))
+            if self.bn:
+                self.bn_lst.append(BatchNormalization())
 
     def call(self, inputs, **kwargs):
         x = inputs
         for i in range(self.num_layer):
             x = self.dense_lst[i](x)
-            x = self.bn_lst[i](x)
+            x = self.bn_lst[i](x) if self.bn else x
             x = self.act_lst[i](x)
             x = self.dropout_lst[i](x)
         return x
@@ -487,7 +489,7 @@ class SENET(Layer):
         self.ratio = ratio
         self.seed = int(seed)
         self.activation = activation
-        super().__init__(seed=seed, **kwargs)
+        super().__init__(**kwargs)
 
     def build(self, input_shape):
         # input_shape = (batch, num_field, k)
@@ -534,7 +536,7 @@ class Bilinear(Layer):
     def __init__(self, _type, seed=None, **kwargs):
         self._type = _type
         self.seed = seed
-        super().__init__(seed=seed, **kwargs)
+        super().__init__(**kwargs)
 
     def build(self, input_shape):
         _, nf, k = input_shape
@@ -563,13 +565,13 @@ class Bilinear(Layer):
         batch, nf, k = inputs.shape
         inputs = tf.split(inputs, nf, axis=1)
 
-        if self.bilinear_type == "all":
+        if self._type == "all":
             p = [multiply([K.dot(i, self.w), j]) for i, j in combinations(inputs, 2)]
 
-        elif self.bilinear_type == "each":
+        elif self._type == "each":
             p = [multiply([K.dot(inputs[i], self.w[i]), inputs[j]]) for i, j in combinations(range(nf), 2)]
 
-        elif self.bilinear_type == "interaction":
+        elif self._type == "interaction":
             p = [multiply([K.dot(inputs[i], self.w[f'{i}_{j}']), inputs[j]]) for i, j in combinations(range(nf), 2)]
         else:
             raise NotImplementedError

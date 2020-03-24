@@ -206,14 +206,14 @@ def auto_int(vocabulary_size, feature_number,
 
 def fibinet(vocabulary_size, feature_number,
             activation, loss, metrics, optimizer,
-            l2_linear=0., l2_pair=0.,
-            se_ratio=3, se_activation='relu',
+            l2_linear=1e-5, l2_pair=1e-5,
+            se_ratio=4, se_activation='relu',
             em_use_bi=True, selike_bi=True,
             bi_type='all',
-            l2_deep=0., use_deep=True,
-            deep_dropout=0., deep_use_bn=False, deep_use_bias=False,
-            num_deep_layer=2, num_neuron=128, deep_activation='relu',
-            k=5, seed=23333):
+            l2_deep=0., use_deep=True, use_linear=True,
+            deep_dropout=0.5, deep_use_bn=False, deep_use_bias=True,
+            num_deep_layer=3, num_neuron=400, deep_activation='relu',
+            k=10, seed=23333):
     # input
     idx, val = Input(shape=[feature_number], dtype='float32'), Input(shape=[feature_number], dtype='float32')
     # em
@@ -235,6 +235,8 @@ def fibinet(vocabulary_size, feature_number,
                      bn=deep_use_bn, use_bias=deep_use_bias)(x)
 
     x = Dense(1, use_bias=False, activation=None)(x)
-    x = Add([x, EmLinear(vocabulary_size, feature_number, name='em_l', l2=l2_linear)([idx, val])])
+    
+    if use_linear:
+        x = Add()([x, EmLinear(vocabulary_size, feature_number, name='em_l', l2=l2_linear)([idx, val])])
     x = AddBias()(x)
     return outputs([idx, val], x, activation, loss, metrics, optimizer)
