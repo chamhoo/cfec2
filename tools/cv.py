@@ -58,7 +58,8 @@ class CV(object):
         x_is_list = isinstance(x, list)
         y_is_list = isinstance(y, list)
         x_is_df = isinstance(x, pd.DataFrame)
-        
+        x_is_dict = isinstance(x, dict)
+
         # oof_pred
         oof_pred = np.zeros([len(y), 1]) if output_oof_pred else None
 
@@ -81,6 +82,7 @@ class CV(object):
         # split & train
         score_lst = list()
         X = x[0] if x_is_list else x
+        X = x[list(x.keys())[0]] if x_is_dict else X
         for idx, (train_idx, valid_idx) in enumerate(split_method.split(X, y)):
             # x
             if x_is_list:
@@ -89,6 +91,9 @@ class CV(object):
             elif x_is_df:
                 x_train = x.loc[train_idx]
                 x_valid = x.loc[valid_idx]
+            elif x_is_dict:
+                x_train = {key: val[train_idx] for key, val in x.items()}
+                x_valid = {key: val[valid_idx] for key, val in x.items()}
             else:
                 x_train = x[train_idx]
                 x_valid = x[valid_idx]
