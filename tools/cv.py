@@ -61,7 +61,7 @@ class CV(object):
         x_is_dict = isinstance(x, dict)
 
         # oof_pred
-        oof_pred = np.zeros([len(y), 1]) if output_oof_pred else None
+        oof_pred = np.zeros([len(y), 1])
 
         # params
         if split_method is None:
@@ -106,26 +106,27 @@ class CV(object):
                 y_valid = y[valid_idx]
             # fit
             if fit_use_valid:
-                fit_params['validation_data'] = (x_valid, y_valid)
+                fit_use_valid = 'validation_data' if fit_use_valid is True else fit_use_valid
+                fit_params[fit_use_valid] = (x_valid, y_valid)
             self.model[idx].fit(x_train, y_train, **fit_params)
             # predict
-            y_pred = self.__pred(self.model[idx], x_valid, eval_param, use_proba)
+            y_pred = self._pred(self.model[idx], x_valid, eval_param, use_proba)
             score = metrics_func(y_valid, y_pred)
             score_lst.append(score)
             if verbose:
                 print(f'folds {idx} is done, score is {score}')
-            if output_oof_pred:
-                oof_pred[valid_idx] = y_pred
+            oof_pred[valid_idx] = y_pred if np.ndim(y_pred) == 2 else np.expand_dims(y_pred, axis=-1)
 
+        total_score = metrics_func(y, oof_pred)
         if output_oof_pred:
-            return np.mean(score_lst), oof_pred
+            return total_score, oof_pred
         else:
-            return np.mean(score_lst)
+            return total_score
 
     def clear_model(self):
         del self.model
 
-    def __pred(self, model, x, pred_param=None, use_proba=False):
+    def _pred(self, model, x, pred_param=None, use_proba=False):
         pred_param = {} if pred_param is None else pred_param
         if use_proba:
             y_pred = model.predict_proba(x, **pred_param)
@@ -137,7 +138,7 @@ class CV(object):
     def predict(self, x, pred_param=None, use_proba=False):
         pred_lst = list()
         for model in self.model:
-            pred_lst.append(self.__pred(model, x, pred_param, use_proba))
+            pred_lst.append(self._pred(model, x, pred_param, use_proba))
         return np.mean(pred_lst, axis=0)
 
     @staticmethod
